@@ -72,12 +72,34 @@ class CMakeAppBase:
     def layout(self):
         cmake_layout(self)
 
+        # Name build folders after the toolchain, so outputs of different
+        # compilers never mix, even when Windows and WSL share one checkout:
+        #   Linux GCC/Clang  -> build/Release_Linux, build/Debug_Linux
+        #   MSYS2 / MinGW    -> build/Release_Mingw, build/Debug_Mingw
+        #   Visual Studio    -> build/Windows  (one solution holds Debug + Release)
+        if self._is_multi_config():
+            # cmake_layout produced <base>; put everything in <base>/<tag>.
+            self.folders.build = os.path.join(self.folders.build, self.platform_tag())
+        else:
+            # cmake_layout produced <base>/<BuildType>; swap the last part.
+            base = os.path.dirname(self.folders.build)
+            name = f"{self.settings.build_type}_{self.platform_tag()}"
+            self.folders.build = os.path.join(base, name)
+        self.folders.generators = os.path.join(self.folders.build, "generators")
+
     def generate(self):
         # find_package() support for whatever the project lists in `requires`.
         # Generates nothing when there are no requirements.
         CMakeDeps(self).generate()
 
         tc = CMakeToolchain(self)
+        # CMakeUserPresets.json in the project root is shared by every build
+        # folder. Distinct prefixes keep names unique across toolchains
+        # (conan-linux-release vs conan-release), which CMake requires.
+        # Visual Studio keeps Conan's standard names: conan-default,
+        # conan-release, conan-debug.
+        if self.settings.get_safe("compiler") != "msvc":
+            tc.presets_prefix = f"conan-{self.platform_tag().lower()}"
         # Lets editors (VS Code, Windsurf, clangd) see real include paths.
         # Only produced by Makefile / Ninja generators, not by Visual Studio.
         tc.cache_variables["CMAKE_EXPORT_COMPILE_COMMANDS"] = "ON"
@@ -105,6 +127,21 @@ class CMakeAppBase:
         """Override to run steps after the build. Call super() first."""
 
     # ---- helpers for mixins and projects ------------------------------------
+
+    def platform_tag(self):
+        """Short toolchain name used in build folder and preset names."""
+        os_name = str(self.settings.os)
+        compiler = self.settings.get_safe("compiler")
+        if os_name == "Windows":
+            return {"msvc": "Windows", "gcc": "Mingw", "clang": "Clang"}.get(compiler, "Windows")
+        return os_name   # Linux, Macos, ...
+
+    def _is_multi_config(self):
+        """Same rule cmake_layout uses to pick a multi-config generator."""
+        gen = self.conf.get("tools.cmake.cmaketoolchain:generator")
+        if gen:
+            return any(k in gen for k in ("Visual", "Xcode", "Multi-Config"))
+        return self.settings.get_safe("compiler") == "msvc"
 
     def built_executables(self):
         """Executables in the build folder (handles VS's per-config subfolder)."""
@@ -318,6 +355,6 @@ class QtApp(QtMixin, CMakeAppBase):
 
 class CMakeBasePackage(ConanFile):
     name = "cmake-base"
-    version = "1.0"
+    version = "1.2"
     package_type = "python-require"
     description = "Shared Conan recipe logic for CMake applications (base + Qt mixin)"
